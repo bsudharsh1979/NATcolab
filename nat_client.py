@@ -31,8 +31,9 @@ from IPython.display import HTML, Image, Markdown, display
 _TASK_DIR = Path(os.environ.get("ALM_HOME", Path(__file__).resolve().parent))
 _VENV = Path(os.environ.get("ALM_VENV") or ("/content/alm-venv" if Path("/content").is_dir() else _TASK_DIR / ".alm-venv"))
 _BIN = _VENV / ("Scripts" if os.name == "nt" else "bin")
-_NAT_BIN = str(_BIN / "nat")
-_PYTHON_BIN = str(_BIN / "python")
+_EXE = ".exe" if os.name == "nt" else ""
+_NAT_BIN = str(_BIN / f"nat{_EXE}")
+_PYTHON_BIN = str(_BIN / f"python{_EXE}")
 
 _LOG_FILE = _TASK_DIR / "nat_serve.log"
 _PHOENIX_LOG = _TASK_DIR / "phoenix_serve.log"
@@ -161,6 +162,8 @@ class NATClient:
 
         if self._proc and self._proc.poll() is None:
             try:
+                if os.name == "nt":
+                    raise OSError
                 os.killpg(self._proc.pid, signal.SIGTERM)
             except Exception:
                 self._proc.terminate()
@@ -407,7 +410,7 @@ class NATClient:
             return
         env = _venv_env()
         env.setdefault("PHOENIX_WORKING_DIR", str(_TASK_DIR / ".phoenix"))
-        self._phoenix = subprocess.Popen([str(_BIN / "phoenix"), "serve"], cwd=str(_TASK_DIR),
+        self._phoenix = subprocess.Popen([str(_BIN / f"phoenix{_EXE}"), "serve"], cwd=str(_TASK_DIR),
                                          stdout=open(_PHOENIX_LOG, "w"), stderr=subprocess.STDOUT,
                                          env=env, start_new_session=True)
         print(f"🔭 Phoenix starting (PID {self._phoenix.pid}) — logs: {_PHOENIX_LOG}")

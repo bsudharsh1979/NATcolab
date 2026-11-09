@@ -55,6 +55,9 @@ NIM_MODELS = {
 # Extra packages installed next to the agent package (see README "What gets installed")
 EXTRA_PACKAGES = [
     "pandas>=2.1,<3",                 # agent code + vanna are not pandas-3 ready
+    "pyarrow<20",                     # newer pyarrow needs NumPy 2 (NAT 1.2.1 pins NumPy 1.26)
+    "chardet<6",                      # keeps `requests` from warning about an unsupported chardet
+    "arize-phoenix-evals<1",          # arize-phoenix 6.2 (pulled in by nvidia-nat-phoenix 1.2.1) needs the 0.x API
     "transformers>=4.33.3,<5",        # MOMENT backbone (T5)
     "huggingface-hub>=0.24,<1.0",
     "plotly>=5.18",
@@ -63,8 +66,11 @@ EXTRA_PACKAGES = [
 ]
 
 _BIN = ALM_VENV / ("Scripts" if os.name == "nt" else "bin")
-VENV_PY = _BIN / ("python.exe" if os.name == "nt" else "python")
-NAT_BIN = _BIN / "nat"
+_EXE = ".exe" if os.name == "nt" else ""
+VENV_PY = _BIN / f"python{_EXE}"
+NAT_BIN = _BIN / f"nat{_EXE}"
+# Optional extra arguments for `uv pip install` (e.g. "--only-binary sqlean-py" on machines without a C compiler)
+UV_EXTRA_ARGS = os.environ.get("ALM_UV_ARGS", "").split()
 
 
 # ----------------------------------------------------------------------------------- helpers
@@ -213,6 +219,12 @@ def patch_agent_source() -> None:
            'output_dir = os.environ.get("ALM_OUTPUT_DIR", "agent_workspace")',
            "multimodal evaluator: use the agent_workspace output folder")
 
+    vu = SRC_DIR / "retrievers" / "vanna_util.py"
+    _patch(vu,
+           'api_key=api_key, model_name=model, input_type="query", truncate="NONE"',
+           'api_key=api_key, model=model, input_type="query", truncate="NONE"',
+           "vanna_util: pass the configured embedding model to NVIDIAEmbeddings (`model=`)")
+
 
 # ----------------------------------------------------------------------------------- 3. venv
 def create_venv(force: bool = False) -> None:
@@ -233,7 +245,7 @@ def create_venv(force: bool = False) -> None:
         _run([*uv, "pip", "install", "--python", VENV_PY, "torch"])
 
     _log("📦 Installing NeMo Agent Toolkit 1.2.1 + ALM agent package (2–4 min) …")
-    _run([*uv, "pip", "install", "--python", VENV_PY, "-e", AGENT_DIR, *EXTRA_PACKAGES])
+    _run([*uv, "pip", "install", "--python", VENV_PY, *UV_EXTRA_ARGS, "-e", AGENT_DIR, *EXTRA_PACKAGES])
     _run([*uv, "pip", "install", "--python", VENV_PY, "--no-deps", "momentfm"])
 
     _log("🔎 Verifying imports …")
@@ -320,6 +332,7 @@ def bootstrap(check_models: bool = True, interactive: bool = True) -> None:
     os.environ["ALM_HOME"] = str(ALM_HOME)
     os.environ["ALM_VENV"] = str(ALM_VENV)
     os.environ["ALM_OUTPUT_DIR"] = str(WORKSPACE)
+    os.environ.setdefault("PHOENIX_WORKING_DIR", str(ALM_HOME / ".phoenix"))
     if str(ALM_HOME) not in sys.path:
         sys.path.insert(0, str(ALM_HOME))
     os.chdir(ALM_HOME)

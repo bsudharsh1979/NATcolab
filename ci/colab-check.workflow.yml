@@ -36,7 +36,7 @@ jobs:
       - name: Kernel-side packages (what Colab already ships)
         run: |
           python -m pip install -q --upgrade pip
-          python -m pip install -q uv requests pandas ipython ipykernel nbclient nbformat matplotlib
+          python -m pip install -q uv requests pandas ipython ipykernel nbclient nbformat matplotlib plotly pyyaml jinja2
           python -m ipykernel install --user --name python3
 
       - name: Smoke test
