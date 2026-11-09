@@ -1,0 +1,290 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# NATcolab -- Asset Lifecycle Management (ALM) agent configuration for Google Colab.
+#
+# Adapted from NVIDIA/GenerativeAIExamples industries/asset_lifecycle_management_agent/configs/config-reasoning.yaml
+# Differences from the DLI lab image:
+#   * every LLM / embedder is a hosted NVIDIA NIM on https://integrate.api.nvidia.com/v1
+#     (the key is read from the NVIDIA_API_KEY environment variable -- never hard-code it here)
+#   * anomaly detection uses the open-source MOMENT time-series foundation model (runs locally,
+#     CPU or GPU) because the NV-Tesseract NIM is not available as a hosted endpoint
+#   * all outputs go to ./agent_workspace (same as the lab)
+#
+# All relative paths are resolved from the NATcolab repo root (the working directory of `nat serve`).
+
+general:
+  use_uvloop: true
+  telemetry:
+    logging:
+      console:
+        _type: console
+        level: INFO
+    # --- EXERCISE 3.1: Uncomment the lines below to enable Phoenix tracing ---
+    # tracing:
+    #   phoenix:
+    #     _type: phoenix
+    #     endpoint: http://localhost:6006/v1/traces
+    #     project: asset-lifecycle-management
+
+llms:
+  # SQL query generation model (used by the Vanna text-to-SQL retriever)
+  sql_llm:
+    _type: nim
+    model_name: "nvidia/nemotron-3-ultra-550b-a55b"
+    max_tokens: 4096
+
+  # Data analysis and tool calling model (ReAct executor)
+  analyst_llm:
+    _type: nim
+    model_name: "nvidia/nemotron-3-ultra-550b-a55b"
+    max_tokens: 8192
+
+  # Main reasoning and planning model
+  reasoning_llm:
+    _type: nim
+    model_name: "nvidia/nemotron-3-ultra-550b-a55b"
+    max_tokens: 8192
+
+  # Multimodal evaluation model (vision-language judge used by `nat eval`)
+  multimodal_judging_llm:
+    _type: nim
+    model_name: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
+    max_tokens: 8192
+
+embedders:
+  # Text embedding model for the Vanna vector store
+  vanna_embedder:
+    _type: nim
+    model_name: "nvidia/nemotron-3.5-embed-1b"
+
+functions:
+  sql_retriever:
+    _type: generate_sql_query_and_retrieve_tool
+    llm_name: "sql_llm"
+    embedding_name: "vanna_embedder"
+    vector_store_type: "chromadb"
+    vector_store_path: "database"
+    db_type: "sqlite"
+    db_connection_string_or_path: "database/nasa_turbo.db"
+    output_folder: "agent_workspace"
+    vanna_training_data_path: "vanna_training_data.yaml"
+
+  predict_rul:
+    _type: predict_rul_tool
+    output_folder: "agent_workspace"
+    scaler_path: "models/scaler_model.pkl"
+    model_path: "models/xgb_model_fd001.pkl"
+
+  # Anomaly detection with the MOMENT-1-small time-series foundation model (open source, local).
+  # (The DLI lab uses `nv_tesseract_anomaly_detection_tool` with a self-hosted NV-Tesseract NIM.)
+  anomaly_detection:
+    _type: moment_anomaly_detection_tool
+    output_folder: "agent_workspace"
+
+  plot_distribution:
+    _type: plot_distribution_tool
+    output_folder: "agent_workspace"
+
+  plot_line_chart:
+    _type: plot_line_chart_tool
+    output_folder: "agent_workspace"
+
+  plot_comparison:
+    _type: plot_comparison_tool
+    output_folder: "agent_workspace"
+
+  plot_anomaly:
+    _type: plot_anomaly_tool
+    output_folder: "agent_workspace"
+
+  data_analysis_assistant:
+    _type: react_agent
+    llm_name: "analyst_llm"
+    max_iterations: 20
+    max_retries: 2
+    tool_names: [
+      "sql_retriever",
+      "predict_rul",
+      "plot_distribution",
+      "plot_line_chart",
+      "plot_comparison",
+      "anomaly_detection",
+      "plot_anomaly"
+    ]
+    parse_agent_response_max_retries: 2
+    system_prompt: |
+      ### TASK DESCRIPTION ####
+      You are a helpful data analysis assistant specializing in Asset Lifecycle Management tasks, currently focused on predictive maintenance for turbofan engines.
+      **USE THE PROVIDED PLAN THAT FOLLOWS "Here is the plan that you could use if you wanted to.."**
+
+      ### TOOLS ###
+      You can use the following tools to help with your task:
+      {tools}
+
+      ### RESPONSE FORMAT ###
+      **STRICTLY RESPOND IN EITHER OF THE FOLLOWING FORMATS**:
+
+      **FORMAT 1 (to share your thoughts)**
+      Input plan: Summarize all the steps in the plan.
+      Executing step: the step you are currently executing from the plan along with any instructions provided
+      Thought: describe how you are going to execute the step
+
+      **FORMAT 2 (to return the final answer)**
+      Input plan: Summarize all the steps in the plan.
+      Executing step: the step you are currently executing from the plan along with any instructions provided
+      Thought: describe how you are going to execute the step
+      Final Answer: the final answer to the original input question including the absolute file paths of the generated files with
+      `./agent_workspace/` prepended to the filename.
+
+      **FORMAT 3 (when using a tool)**
+      Input plan: Summarize all the steps in the plan.
+      Executing step: the step you are currently executing from the plan along with any instructions provided
+      Thought: describe how you are going to execute the step
+      Action: the action to take, should be one of [{tool_names}]
+      Action Input: the input to the tool (if there is no required input, include "Action Input: None")
+      Observation: wait for the tool to finish execution and return the result
+
+      ### HOW TO CHOOSE THE RIGHT TOOL ###
+      Follow these guidelines while deciding the right tool to use:
+      **CRITICAL: When writing Action: tool_name, use PLAIN TEXT ONLY. Do NOT use markdown formatting like **tool_name**. Just write the tool name directly.**
+      **Ensure that tool calls do not use single quotes or double quotes within the key-value pairs.**
+
+      1. **SQL Retrieval Tool**
+         - Use this tool to retrieve data from the database.
+         - NEVER generate SQL queries by yourself, instead pass the top-level instruction to the tool.
+
+      2. **Prediction Tools**
+         - Use predict_rul for RUL prediction requests.
+         - Always call data retrieval tool to get sensor data before predicting RUL.
+
+      3. **Analysis and Plotting Tools**
+         - plot_line_chart: to plot line charts between two columns of a dataset.
+         - plot_distribution: to plot a histogram/distribution analysis of a column.
+         - plot_comparison: to compare two columns of a dataset by plotting both of them on the same chart.
+
+      4. **Anomaly Detection Tools**
+         - Use anomaly_detection tool for anomaly detection using the MOMENT time-series foundation model.
+         - **REQUIRES JSON DATA**: First use sql_retriever to get sensor data (include unit_number, time_in_cycles and the sensor column), then pass the JSON file path to anomaly_detection.
+         - **OUTPUT**: Creates enhanced sensor data with added 'is_anomaly' boolean column.
+         - Use plot_anomaly to create interactive visualizations of anomaly detection results.
+
+      5. **File Path Handling**
+         - Tools save their outputs in the agent_workspace folder. Pass file names returned by one tool directly to the next tool.
+
+      ### TYPICAL WORKFLOW FOR EXECUTING A PLAN ###
+
+      First, Data Extraction and analysis
+         - Use SQL retrieval tool to fetch required data
+      Finally, Data Visualization
+         - Use existing plotting tools to generate plots
+         - Use predict_rul, anomaly_detection or any other relevant tools to perform analysis
+      Finally, return the result to the user
+         - Return processed information to calling agent.
+
+workflow:
+  _type: reasoning_agent
+  augmented_fn: "data_analysis_assistant"
+  llm_name: "reasoning_llm"
+  verbose: true
+  reasoning_prompt_template: |
+    ### DESCRIPTION ###
+    You are a Data Analysis Reasoning and Planning Expert specialized in Asset Lifecycle Management, with expertise in analyzing turbofan engine sensor data and predictive maintenance tasks.
+    You are tasked with creating detailed execution plans for addressing user queries while being conversational and helpful.
+
+    Your Role and Capabilities:**
+    - Expert in Asset Lifecycle Management, turbofan engine data analysis, predictive maintenance, and anomaly detection
+    - Provide conversational responses while maintaining technical accuracy
+    - Create step-by-step execution plans using available tools which will be invoked by a data analysis assistant
+
+    **You are given a data analysis assistant to execute your plan, all you have to do is generate the plan**
+    DO NOT USE MARKDOWN FORMATTING IN YOUR RESPONSE.
+
+    ### ASSISTANT DESCRIPTION ###
+    {augmented_function_desc}
+
+    ### TOOLS AVAILABLE TO THE ASSISTANT ###
+    {tools}
+
+    ### CONTEXT ###
+    You work with turbofan engine sensor data from multiple engines in a fleet. The data contains:
+    - **Time series data** from different engines, each with unique wear patterns and operational history separated into
+    four datasets (FD001, FD002, FD003, FD004), each dataset is further divided into training and test subsets.
+    - **26 data columns**: unit number, time in cycles, 3 operational settings, and 21 sensor measurements
+    - **Engine lifecycle**: Engines start operating normally, then develop faults that grow until system failure
+    - **Asset Lifecycle Management - Operation & Maintenance Phase**: Predict Remaining Useful Life (RUL) - how many operational cycles before failure
+    - **Data characteristics**: Contains normal operational variation, sensor noise, and progressive fault development
+    This context helps you understand user queries about engine health, sensor patterns, failure prediction, and maintenance planning.
+    REMEMBER TO RELY ON DATA ANALYSIS ASSITANT TO RETRIEVE DATA FROM THE DATABASE.
+
+    ### SPECIAL CONSTRAINTS ###
+    Create execution plans for Asset Lifecycle Management tasks (currently focused on predictive maintenance and sensor data analysis). For other queries, use standard reasoning.
+
+    ### GUIDELINES ###
+    **DO NOT use predict_rul tool to fetch RUL data unless the user explicitly uses the word "predict" or something similar, this is because there is also ground truth RUL data in the database which the user might request sometimes.**
+    **REMEMBER: SQL retrieval tool is smart enough to understand queries like counts, totals, basic facts etc. It can use UNIQUE(), COUNT(), SUM(), AVG(), MIN(), MAX() to answer simple queries.**
+
+    **User Input:**
+    {input_text}
+
+    Analyze the input and create an appropriate execution plan in bullet points.
+
+eval:
+  general:
+    output:
+      dir: "eval_output"
+      cleanup: true
+    dataset:
+      _type: json
+      file_path: "eval_set_lab.json"
+    query_delay: 10         # seconds between queries
+    max_concurrent: 1       # process queries sequentially
+
+  evaluators:
+    multimodal_eval:
+      _type: multimodal_llm_judge_evaluator
+      llm_name: "multimodal_judging_llm"
+      judge_prompt: |
+        You are an expert evaluator for Asset Lifecycle Management agentic workflows, with expertise in predictive maintenance tasks.
+        Your task is to evaluate how well a generated response (which may include both text and visualizations)
+        matches the reference answer for a given question.
+
+        Question: {question}
+        Reference Answer: {reference_answer}
+        Generated Response: {generated_answer}
+
+        IMPORTANT: You MUST provide your response ONLY as a valid JSON object.
+        Do not include any text before or after the JSON.
+
+        # EVALUATION LOGIC
+        Your evaluation mode is determined by whether actual plot images are attached to this message:
+        - If PLOT IMAGES are attached → Perform ONLY PLOT EVALUATION by examining the actual plot images
+        - If NO IMAGES are attached → Perform ONLY TEXT EVALUATION of the text response
+
+        DO NOT confuse text mentions of plots/files with actual attached images.
+        Only evaluate plots if you can actually see plot images in this message.
+
+        ## TEXT EVALUATION (only when no images are attached)
+        Check if the generated text answer semantically matches the reference answer:
+        - 1.0: Generated answer fully matches the reference answer semantically
+        - 0.5: Generated answer partially matches with some missing/incorrect elements
+        - 0.0: Generated answer does not match the reference answer semantically
+
+        ## PLOT EVALUATION (only when images are attached)
+        Use the reference answer as expected plot description and check how well the actual plot matches:
+        - 1.0: Generated plot shows all major elements described in the reference answer
+        - 0.5: Generated plot shows some elements but missing significant aspects
+        - 0.0: Generated plot does not match the reference answer description
+
+        # RESPONSE FORMAT
+        You MUST respond with ONLY this JSON format:
+        {{
+            "score": 0.0,
+            "reasoning": "EVALUATION TYPE: [TEXT or PLOT] - [your analysis and score with justification]"
+        }}
+
+        CRITICAL REMINDER:
+        - If images are attached → Use "EVALUATION TYPE: PLOT"
+        - If no images → Use "EVALUATION TYPE: TEXT"
+
+        Replace the score with your actual evaluation (0.0, 0.5, or 1.0).

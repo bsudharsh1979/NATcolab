@@ -1,0 +1,62 @@
+name: Colab compatibility check
+
+# Runs the NATcolab setup and notebooks on a fresh Ubuntu VM with Python 3.12 — the same
+# environment family as a Google Colab runtime — against the hosted NVIDIA NIM endpoints.
+# Requires the repository secret NVIDIA_API_KEY.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "smoke = bootstrap + 3 agent queries, notebooks = execute every notebook"
+        type: choice
+        options: [smoke, notebooks]
+        default: notebooks
+      notebooks:
+        description: "Space-separated notebook names to run (empty = all)"
+        type: string
+        default: ""
+
+jobs:
+  colab-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+      ALM_HOME: ${{ github.workspace }}
+      ALM_VENV: /home/runner/alm-venv
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Kernel-side packages (what Colab already ships)
+        run: |
+          python -m pip install -q --upgrade pip
+          python -m pip install -q uv requests pandas ipython ipykernel nbclient nbformat matplotlib
+          python -m ipykernel install --user --name python3
+
+      - name: Smoke test
+        if: ${{ github.event.inputs.mode == 'smoke' }}
+        run: python ci/smoke_test.py
+
+      - name: Execute notebooks
+        if: ${{ github.event.inputs.mode != 'smoke' }}
+        run: python ci/run_notebooks.py ${{ github.event.inputs.notebooks }}
+
+      - name: Collect logs
+        if: always()
+        run: |
+          mkdir -p ci/executed/logs
+          cp -f *.log ci/executed/logs/ 2>/dev/null || true
+          ls -la agent_workspace > ci/executed/logs/agent_workspace.txt 2>/dev/null || true
+          cp -rf Assessment/output ci/executed/assessment_output 2>/dev/null || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: executed-notebooks
+          path: ci/executed/
