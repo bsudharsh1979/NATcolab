@@ -363,6 +363,7 @@ class NATClient:
 
     def _query_stream(self, message: str, *, render: bool, timeout: int) -> str:
         answer_parts: list[str] = []
+        handles: dict[str, object] = {}  # one collapsible block per step id (LLM token updates are merged)
         try:
             with requests.post(f"{self.base_url}/chat/stream",
                                json={"messages": [{"role": "user", "content": message}], "stream": True},
@@ -376,10 +377,19 @@ class NATClient:
                             step = json.loads(raw[len("intermediate_data:"):].strip())
                         except json.JSONDecodeError:
                             continue
+                        if not render:
+                            continue
                         name = step.get("name", "step")
                         payload = str(step.get("payload", ""))
-                        if render:
-                            display(Markdown(f"<details><summary>🔧 <b>{name}</b></summary>\n\n{payload[:4000]}\n\n</details>"))
+                        if len(payload) > 3000:
+                            payload = payload[:1500] + "\n\n…\n\n" + payload[-1500:]
+                        icon = "🧠" if "/" in name else "🔧"
+                        block = Markdown(f"<details><summary>{icon} <b>{name}</b></summary>\n\n{payload}\n\n</details>")
+                        key = str(step.get("id") or name)
+                        if key in handles:
+                            handles[key].update(block)  # type: ignore[attr-defined]
+                        else:
+                            handles[key] = display(block, display_id=True)
                     elif raw.startswith("data:"):
                         body = raw[len("data:"):].strip()
                         if body == "[DONE]":
